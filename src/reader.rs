@@ -304,7 +304,7 @@ impl Reader<'_> {
 
         // Check if encrypted
         let is_encrypted = self.document.trailer.get(b"Encrypt").is_ok();
-        
+
         if is_encrypted {
             // For encrypted PDFs, use a special loading strategy
             self.load_encrypted_document(filter_func)?;
@@ -312,16 +312,22 @@ impl Reader<'_> {
             // For non-encrypted PDFs, use the normal loading
             self.load_objects_raw(filter_func)?;
         }
-        
+
         Ok(self.document)
     }
-    
+
     fn load_encrypted_document(&mut self, _filter_func: Option<FilterFunc>) -> Result<()> {
         // First, extract all raw object bytes without parsing
-        let entries: Vec<_> = self.document.reference_table.entries.iter().map(|(k, v)| (*k, v.clone())).collect();
-        
+        let entries: Vec<_> = self
+            .document
+            .reference_table
+            .entries
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+
         let mut object_streams = Vec::new();
-        
+
         for (obj_num, entry) in entries {
             match entry {
                 XrefEntry::Normal { offset, .. } => {
@@ -338,7 +344,7 @@ impl Reader<'_> {
                 }
             }
         }
-        
+
         // Now setup encryption state
         if let Ok(encrypt_ref) = self.document.trailer.get(b"Encrypt").and_then(|o| o.as_reference()) {
             // Parse just the encryption dictionary
@@ -349,16 +355,19 @@ impl Reader<'_> {
                 }
             }
         }
-        
+
         // Try to authenticate with empty password
         if self.document.authenticate_password("").is_ok() {
             match EncryptionState::decode(&self.document, "") {
                 Ok(state) => {
                     // Now decrypt and parse all other objects
-                    let encrypt_ref = self.document.trailer.get(b"Encrypt")
+                    let encrypt_ref = self
+                        .document
+                        .trailer
+                        .get(b"Encrypt")
                         .ok()
                         .and_then(|o| o.as_reference().ok());
-                    
+
                     for (obj_id, raw_bytes) in &self.raw_objects {
                         // Skip the encryption dictionary
                         if let Some(enc_ref) = encrypt_ref {
@@ -366,7 +375,7 @@ impl Reader<'_> {
                                 continue;
                             }
                         }
-                        
+
                         // Parse the raw object
                         if let Ok((id, mut obj)) = self.parse_raw_object(raw_bytes) {
                             // Decrypt the parsed object
@@ -374,25 +383,27 @@ impl Reader<'_> {
                             self.document.objects.insert(id, obj);
                         }
                     }
-                    
+
                     // Now process compressed objects from object streams
-                    
+
                     // Group objects by their container stream for efficiency
-                    let mut streams_to_process: std::collections::HashMap<u32, Vec<(u32, u16)>> = std::collections::HashMap::new();
+                    let mut streams_to_process: std::collections::HashMap<u32, Vec<(u32, u16)>> =
+                        std::collections::HashMap::new();
                     for (obj_num, container_id, index) in object_streams {
-                        streams_to_process.entry(container_id).or_default().push((obj_num, index));
+                        streams_to_process
+                            .entry(container_id)
+                            .or_default()
+                            .push((obj_num, index));
                     }
-                    
+
                     // Process each object stream
                     for (container_id, objects_in_stream) in streams_to_process {
-                        
                         // Get the container stream
                         if let Some(container_obj) = self.document.objects.get_mut(&(container_id, 0)) {
                             if let Ok(stream) = container_obj.as_stream_mut() {
                                 // Parse the object stream
                                 match ObjectStream::new(stream) {
                                     Ok(object_stream) => {
-                                        
                                         // Extract the objects we need
                                         for (obj_num, _index) in objects_in_stream {
                                             let obj_id = (obj_num, 0);
@@ -408,7 +419,7 @@ impl Reader<'_> {
                             }
                         }
                     }
-                    
+
                     self.document.encryption_state = Some(state);
                 }
                 Err(e) => {
@@ -418,10 +429,10 @@ impl Reader<'_> {
         } else {
             warn!("PDF is encrypted and requires a password");
         }
-        
+
         Ok(())
     }
-    
+
     fn parse_raw_object(&self, raw_bytes: &[u8]) -> Result<(ObjectId, Object)> {
         // Parse the raw bytes as an indirect object
         parser::indirect_object(
@@ -432,7 +443,7 @@ impl Reader<'_> {
             &mut HashSet::new(),
         )
     }
-    
+
     fn load_objects_raw(&mut self, filter_func: Option<FilterFunc>) -> Result<()> {
         let is_encrypted = self.document.trailer.get(b"Encrypt").is_ok();
         let zero_length_streams = Mutex::new(vec![]);
@@ -486,7 +497,7 @@ impl Reader<'_> {
                 None
             }
         };
-        
+
         #[cfg(feature = "rayon")]
         {
             self.document.objects = self
@@ -507,7 +518,7 @@ impl Reader<'_> {
                 .filter_map(entries_filter_map)
                 .collect();
         }
-        
+
         // Only add entries, but never replace entries
         for (id, entry) in object_streams.into_inner().unwrap() {
             self.document.objects.entry(id).or_insert(entry);
@@ -516,7 +527,7 @@ impl Reader<'_> {
         for object_id in zero_length_streams.into_inner().unwrap() {
             let _ = self.read_stream_content(object_id);
         }
-        
+
         Ok(())
     }
 
@@ -562,7 +573,7 @@ impl Reader<'_> {
     }
 
     /// Get object offset by object ID.
-    fn get_offset(&self, id: ObjectId) -> Result<u32> {
+    fn get_offset(&self, id: ObjectId) -> Result<u64> {
         let entry = self.document.reference_table.get(id.0).ok_or(Error::MissingXrefEntry)?;
         match *entry {
             XrefEntry::Normal { offset, generation } if generation == id.1 => Ok(offset),
@@ -587,16 +598,16 @@ impl Reader<'_> {
         if offset > self.buffer.len() {
             return Err(Error::InvalidOffset(offset));
         }
-        
+
         // Find object header (e.g., "19 0 obj")
         let slice = &self.buffer[offset..];
-        
+
         // Parse object ID
         let mut pos = 0;
         while pos < slice.len() && slice[pos].is_ascii_whitespace() {
             pos += 1;
         }
-        
+
         // Get object number
         let num_start = pos;
         while pos < slice.len() && slice[pos].is_ascii_digit() {
@@ -606,12 +617,12 @@ impl Reader<'_> {
             .ok()
             .and_then(|s| s.parse().ok())
             .ok_or(Error::Parse(ParseError::InvalidXref))?;
-        
+
         // Skip whitespace
         while pos < slice.len() && slice[pos].is_ascii_whitespace() {
             pos += 1;
         }
-        
+
         // Get generation number
         let gen_start = pos;
         while pos < slice.len() && slice[pos].is_ascii_digit() {
@@ -621,7 +632,7 @@ impl Reader<'_> {
             .ok()
             .and_then(|s| s.parse().ok())
             .ok_or(Error::Parse(ParseError::InvalidXref))?;
-        
+
         // Skip to "obj"
         while pos < slice.len() && slice[pos].is_ascii_whitespace() {
             pos += 1;
@@ -630,7 +641,7 @@ impl Reader<'_> {
             return Err(Error::Parse(ParseError::InvalidXref));
         }
         pos += 3;
-        
+
         // Find "endobj"
         let endobj_pattern = b"endobj";
         let mut end_pos = pos;
@@ -641,17 +652,17 @@ impl Reader<'_> {
             }
             end_pos += 1;
         }
-        
+
         if end_pos > slice.len() {
             return Err(Error::Parse(ParseError::InvalidXref));
         }
-        
+
         // Extract raw object bytes (including header and trailer)
         let raw_bytes = slice[0..end_pos].to_vec();
-        
+
         Ok(((obj_num, obj_gen), raw_bytes))
     }
-    
+
     fn read_object(
         &self, offset: usize, expected_id: Option<ObjectId>, already_seen: &mut HashSet<ObjectId>,
     ) -> Result<(ObjectId, Object)> {
