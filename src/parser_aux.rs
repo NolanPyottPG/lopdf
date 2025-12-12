@@ -1,6 +1,8 @@
 use log::warn;
 
+use crate::{Dictionary, Object, ObjectId, Stream, parser};
 use crate::{
+    Error, Result,
     content::{Content, Operation},
     document::Document,
     encodings::Encoding,
@@ -8,9 +10,7 @@ use crate::{
     object::Object::Name,
     parser::ParserInput,
     xref::{Xref, XrefEntry, XrefType},
-    Error, Result,
 };
-use crate::{parser, Dictionary, Object, ObjectId, Stream};
 use std::{
     collections::BTreeMap,
     io::{Cursor, Read},
@@ -164,14 +164,12 @@ impl Document {
                         .as_name()?;
                     current_encoding = encodings.get(current_font);
                 }
-                "Tj" | "TJ" => {
-                    match current_encoding {
-                        Some(encoding) => {
-                            try_to_replace_encoded_text(operation, encoding, text, other_text, default_str.unwrap_or(""))?
-                        }
-                        None => {
-                            warn!("Could not decode extracted text, some of the occurances might not be properly replaced")
-                        }
+                "Tj" | "TJ" => match current_encoding {
+                    Some(encoding) => {
+                        try_to_replace_encoded_text(operation, encoding, text, other_text, default_str.unwrap_or(""))?
+                    }
+                    None => {
+                        warn!("Could not decode extracted text, some of the occurances might not be properly replaced")
                     }
                 },
                 _ => {}
@@ -182,29 +180,25 @@ impl Document {
     }
 
     pub fn replace_partial_text(
-        &mut self,
-        page_number: u32,
-        search_text: &str,
-        replacement_text: &str,
-        default_char: Option<&str>,
+        &mut self, page_number: u32, search_text: &str, replacement_text: &str, default_char: Option<&str>,
     ) -> Result<usize> {
         let page = page_number.saturating_sub(1) as usize;
         let page_id = self
             .page_iter()
             .nth(page)
             .ok_or(Error::PageNumberNotFound(page_number))?;
-        
+
         let encodings: BTreeMap<Vec<u8>, Encoding> = self
             .get_page_fonts(page_id)?
             .into_iter()
             .map(|(name, font)| font.get_font_encoding(self).map(|it| (name, it)))
             .collect::<Result<BTreeMap<Vec<u8>, Encoding>>>()?;
-        
+
         let content_data = self.get_page_content(page_id)?;
         let mut content = Content::decode(&content_data)?;
         let mut current_encoding = None;
         let mut replacement_count = 0;
-        
+
         for operation in &mut content.operations {
             match operation.operator.as_ref() {
                 "Tf" => {
@@ -231,12 +225,12 @@ impl Document {
                 _ => {}
             }
         }
-        
+
         if replacement_count > 0 {
             let modified_content = content.encode()?;
             self.change_page_content(page_id, modified_content)?;
         }
-        
+
         Ok(replacement_count)
     }
 
@@ -394,14 +388,10 @@ fn try_to_replace_encoded_text(
 }
 
 fn replace_partial_in_operation(
-    operation: &mut Operation,
-    encoding: &Encoding,
-    search_text: &str,
-    replacement_text: &str,
-    default_char: &str,
+    operation: &mut Operation, encoding: &Encoding, search_text: &str, replacement_text: &str, default_char: &str,
 ) -> Result<usize> {
     let mut replacement_count = 0;
-    
+
     for operand in &mut operation.operands {
         match operand {
             Object::String(bytes, _) => {
@@ -414,27 +404,18 @@ fn replace_partial_in_operation(
                 }
             }
             Object::Array(arr) => {
-                replacement_count += replace_partial_in_array(
-                    arr,
-                    encoding,
-                    search_text,
-                    replacement_text,
-                    default_char,
-                )?;
+                replacement_count +=
+                    replace_partial_in_array(arr, encoding, search_text, replacement_text, default_char)?;
             }
             _ => {}
         }
     }
-    
+
     Ok(replacement_count)
 }
 
 fn replace_partial_in_array(
-    arr: &mut [Object],
-    encoding: &Encoding,
-    search_text: &str,
-    replacement_text: &str,
-    default_char: &str,
+    arr: &mut [Object], encoding: &Encoding, search_text: &str, replacement_text: &str, default_char: &str,
 ) -> Result<usize> {
     let mut replacement_count = 0;
 
@@ -449,20 +430,16 @@ fn replace_partial_in_array(
             }
         }
     }
-    
+
     Ok(replacement_count)
 }
 
-fn encode_with_fallback(
-    encoding: &Encoding,
-    text: &str,
-    default_char: &str,
-) -> Vec<u8> {
+fn encode_with_fallback(encoding: &Encoding, text: &str, default_char: &str) -> Vec<u8> {
     let encoded = Document::encode_text(encoding, text);
     if !encoded.is_empty() {
         return encoded;
     }
-    
+
     encode(encoding, text, default_char)
 }
 
@@ -518,7 +495,7 @@ pub fn decode_xref_stream(mut stream: Stream) -> Result<(Xref, Dictionary)> {
                     }
                     1 => {
                         // normal object
-                        let offset = read_big_endian_integer(&mut reader, bytes2.as_mut_slice())?;
+                        let offset = read_big_endian_large_integer(&mut reader, bytes2.as_mut_slice())?;
                         let generation = if !bytes3.is_empty() {
                             read_big_endian_integer(&mut reader, bytes3.as_mut_slice())?
                         } else {
@@ -552,6 +529,15 @@ fn read_big_endian_integer(reader: &mut Cursor<Vec<u8>>, buffer: &mut [u8]) -> R
     Ok(value)
 }
 
+fn read_big_endian_large_integer(reader: &mut Cursor<Vec<u8>>, buffer: &mut [u8]) -> Result<u64> {
+    reader.read_exact(buffer)?;
+    let mut value = 0;
+    for &mut byte in buffer {
+        value = (value << 8) + u64::from(byte);
+    }
+    Ok(value)
+}
+
 fn parse_integer_array(array: &Object) -> Result<Vec<i64>> {
     let array = array.as_array()?;
     let mut out = Vec::with_capacity(array.len());
@@ -568,8 +554,8 @@ mod tests {
     #[cfg(not(feature = "async"))]
     #[test]
     fn load_and_save() {
-        use crate::creator::tests::{create_document, save_document};
         use crate::Document;
+        use crate::creator::tests::{create_document, save_document};
 
         // test load_from() and save_to()
         use std::fs::File;
@@ -628,7 +614,7 @@ mod tests {
         let mut doc = create_document_with_texts(&["Hello World! Hello Universe!"]);
         let replacements = doc.replace_partial_text(1, "Hello", "Hi", None).unwrap();
         assert_eq!(replacements, 2); // Should replace both occurrences
-        
+
         let extracted_text = doc.extract_text(&[1]).unwrap();
         assert!(extracted_text.contains("Hi World! Hi Universe!"));
     }
